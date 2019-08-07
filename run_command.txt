@@ -1,3 +1,3 @@
-python ar_capsulenet.py --gpu 0 --dataset cifar10 --epochs 50 --aug False --save_dir ./result  --layernum 3 --dimcaps 32
-
-python ar_capsulenet.py --gpu 0 --dataset mnist --epochs 50 --aug False --save_dir ./result  --layernum 0 --dimcaps 32
+python ar_capsulenet.py --gpu 0 --dataset mnist --epochs 20 --aug False --save_dir ./result/mnist --layernum 1 --dimcaps 32
+python ar_capsulenet.py --gpu 0 --dataset affnist --epochs 20 --aug True --save_dir ./result/affnist --layernum 1 --dimcaps 16
+python ar_capsulenet.py --gpu 0 --dataset cifar10 --epochs 200 --aug False --save_dir ./result/cifar10 --layernum 4 --dimcaps 32

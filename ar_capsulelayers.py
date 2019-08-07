@@ -48,11 +48,15 @@ class Mask(layers.Layer):
         return config
 
 class PrimaryCap(layers.Layer):
-    def __init__(self, n_channels, dim_capsule, kernel_regularizer=None, **kwargs):
+    def __init__(self, n_channels, dim_capsule, decrease_resolution=False, kernel_regularizer=None, **kwargs):
         super(PrimaryCap, self).__init__(**kwargs)
 
         self.n_channels = n_channels
         self.dim_capsule = dim_capsule
+        if decrease_resolution == True:
+            self.stride = 2
+        else:
+            self.stride = 1
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         
     def build(self, input_shape):
@@ -72,7 +76,7 @@ class PrimaryCap(layers.Layer):
         
         
     def call(self, inputs):
-        conv1s = tf.nn.conv2d(inputs, self.convW_1, strides=[1, 2, 2, 1], padding='SAME')
+        conv1s = tf.nn.conv2d(inputs, self.convW_1, strides=[1, self.stride, self.stride, 1], padding='SAME')
         conv1s = tf.nn.bias_add(conv1s, self.bias_1)
         conv1s = tf.nn.relu(conv1s)
         conv1s = tf.split(conv1s, self.n_channels, axis=-1)
@@ -91,7 +95,7 @@ class PrimaryCap(layers.Layer):
         return outputs
         
     def compute_output_shape(self, input_shape):
-        return tuple([None, int(self.input_height/2), int(self.input_width/2), self.dim_capsule, self.n_channels])
+        return tuple([None, int(self.input_height/self.stride), int(self.input_width/self.stride), self.dim_capsule, self.n_channels])
     
     def get_config(self):
         config = {
@@ -128,10 +132,6 @@ class ConvCaps(layers.Layer):
                                        regularizer=self.kernel_regularizer, trainable=True)
         self.ConvTrans_B = self.add_weight(shape=[self.input_ch*self.dim_capsule*self.n_channels],
                                            initializer='zeros', name='ConvTrans_B',trainable=True)
-        self.FeaExt_W = self.add_weight(shape =[3, 3, self.dim_capsule, self.dim_capsule*self.n_channels],
-                                       initializer='glorot_uniform',  name='FeaExt_W',
-                                       regularizer=self.kernel_regularizer, trainable=True)
-        self.FeaExt_B = self.add_weight(shape=[self.dim_capsule*self.n_channels], initializer='zeros', name='FeaExt_B',trainable=True)
         self.CapsAct_W = self.add_weight(shape =[1, 1, self.dim_capsule, self.dim_capsule*self.n_channels],
                                        initializer='glorot_uniform',  name='CapsAct_W',
                                        regularizer=self.kernel_regularizer, trainable=True)
@@ -139,6 +139,7 @@ class ConvCaps(layers.Layer):
         
         
     def call(self, inputs):
+        inputs = Dropout(rate=0.5)(inputs)
         input_caps = tf.split(inputs, self.input_ch, axis=-1)
         ConvTrans_ws = tf.split(self.ConvTrans_W, self.input_ch, axis=-1)
         ConvTrans_bs = tf.split(self.ConvTrans_B, self.input_ch, axis=-1)
@@ -154,12 +155,10 @@ class ConvCaps(layers.Layer):
         # Att_inputs shape : (n_ch, batch_sz, h, w, dim_cap, input_ch, 1)
         Att_inputs = tf.split(conv1s, self.n_channels, axis=-1)
         Att_ws = tf.split(self.Att_W, self.n_channels, axis=-1)
-        FeaExt_ws = tf.split(self.FeaExt_W, self.n_channels, axis=-1)
-        FeaExt_bs = tf.split(self.FeaExt_B, self.n_channels, axis=-1)
         CapsAct_ws = tf.split(self.CapsAct_W, self.n_channels, axis=-1)
         CapsAct_bs = tf.split(self.CapsAct_B, self.n_channels, axis=-1)
         
-        def func(conv1, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b) :
+        def func(conv1, Att_w, CapsAct_w, CapsAct_b) :
             x = tf.squeeze(conv1, axis=-1) #x.shape = (batch_sz, height, width, dim_cap, input_ch)
             
             # Attention Routing
@@ -169,18 +168,13 @@ class ConvCaps(layers.Layer):
             final_attentions = Multiply()([x, attentions])
             final_attentions = tf.reduce_sum(final_attentions, axis=-1) #final_attentions.shape = (batch_sz, height, width, dim_cap)
             
-            # Feature Extraction
-            conv2 = tf.nn.conv2d(final_attentions, FeaExt_w, strides=[1, 1, 1, 1], padding='SAME')
-            conv2 = tf.nn.bias_add(conv2, FeaExt_b)
-            conv2 = tf.nn.relu(conv2)
-            
-            conv3 = tf.nn.conv2d(conv2, CapsAct_w, strides=[1, 1, 1, 1], padding='SAME')
+            conv3 = tf.nn.conv2d(final_attentions, CapsAct_w, strides=[1, 1, 1, 1], padding='SAME')
             conv3 = tf.nn.bias_add(conv3, CapsAct_b)
             conv3 = tf.expand_dims(conv3, axis=-1)
             return conv3
         
-        outputs =  [func(Att_input, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b) for Att_input, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b in 
-                   zip(Att_inputs, Att_ws, FeaExt_ws, CapsAct_ws, FeaExt_bs, CapsAct_bs)]
+        outputs =  [func(Att_input, Att_w, CapsAct_w, CapsAct_b) for Att_input, Att_w, CapsAct_w, CapsAct_b in 
+                   zip(Att_inputs, Att_ws, CapsAct_ws, CapsAct_bs)]
         outputs = tf.concat(outputs, axis=-1)
         return outputs
     
@@ -212,16 +206,11 @@ class FullyConvCaps(layers.Layer):
         
         self.Att_W = self.add_weight(shape=[1, 1, self.dim_capsule, self.input_ch, self.input_ch*self.n_channels],
                                      initializer='glorot_uniform',  name='Att_W',trainable=True)
-        self.ConvTrans_W = self.add_weight(shape =[3, 3, self.input_dim, self.input_ch*self.dim_capsule*self.n_channels],
+        self.ConvTrans_W = self.add_weight(shape =[self.height, self.width, self.input_dim, self.input_ch*self.dim_capsule*self.n_channels],
                                        initializer='glorot_uniform',  name='ConvTrans_W',
                                        regularizer=self.kernel_regularizer, trainable=True)
         self.ConvTrans_B = self.add_weight(shape=[self.input_ch*self.dim_capsule*self.n_channels],
                                            initializer='zeros', name='ConvTrans_B',trainable=True)
-        self.FeaExt_W = self.add_weight(shape =[self.height, self.width, self.dim_capsule, self.dim_capsule*self.n_channels],
-                                       initializer='glorot_uniform',  name='FeaExt_W',
-                                       regularizer=self.kernel_regularizer, trainable=True)
-        self.FeaExt_B = self.add_weight(shape=[self.dim_capsule*self.n_channels], initializer='zeros', name='FeaExt_B',trainable=True)
-        
         self.CapsAct_W = self.add_weight(shape =[1, 1, self.dim_capsule, self.dim_capsule*self.n_channels],
                                        initializer='glorot_uniform',  name='CapsAct_W',
                                        regularizer=self.kernel_regularizer, trainable=True)
@@ -229,14 +218,15 @@ class FullyConvCaps(layers.Layer):
         
         
     def call(self, inputs):
+        inputs = Dropout(rate=0.5)(inputs)
         input_caps = tf.split(inputs, self.input_ch, axis=-1)
         ConvTrans_ws = tf.split(self.ConvTrans_W, self.input_ch, axis=-1)
         ConvTrans_bs = tf.split(self.ConvTrans_B, self.input_ch, axis=-1)
                 
         # Convolutional Transform by 3x3 conv 
-        conv1s = [tf.nn.conv2d(tf.squeeze(input_cap, axis=-1), ConvTrans_w, strides=[1, 1, 1, 1], padding='SAME')
+        conv1s = [tf.nn.conv2d(tf.squeeze(input_cap, axis=-1), ConvTrans_w, strides=[1, 1, 1, 1], padding='VALID')
                   for input_cap, ConvTrans_w in zip(input_caps, ConvTrans_ws)]
-        conv1s = [tf.reshape(tf.nn.bias_add(conv1, ConvTrans_b), [-1, self.height, self.width, self.dim_capsule, self.n_channels, 1])
+        conv1s = [tf.reshape(tf.nn.bias_add(conv1, ConvTrans_b), [-1, 1, 1, self.dim_capsule, self.n_channels, 1])
                   for conv1, ConvTrans_b in zip(conv1s, ConvTrans_bs)]
         conv1s = tf.concat(conv1s, axis=-1)
         conv1s = tf.transpose(conv1s, [0,1,2,3,5,4])
@@ -244,14 +234,12 @@ class FullyConvCaps(layers.Layer):
         # Att_inputs shape : (n_ch, batch_sz, h, w, dim_cap, input_ch, 1)
         Att_inputs = tf.split(conv1s, self.n_channels, axis=-1)
         Att_ws = tf.split(self.Att_W, self.n_channels, axis=-1)
-        FeaExt_ws = tf.split(self.FeaExt_W, self.n_channels, axis=-1)
-        FeaExt_bs = tf.split(self.FeaExt_B, self.n_channels, axis=-1)
         CapsAct_ws = tf.split(self.CapsAct_W, self.n_channels, axis=-1)
         CapsAct_bs = tf.split(self.CapsAct_B, self.n_channels, axis=-1)
         
             
-        def func(conv1, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b) :
-            x = tf.squeeze(conv1, axis=-1) #x.shape = (batch_sz, height, width, dim, input_ch)
+        def func(conv1, Att_w, CapsAct_w, CapsAct_b) :
+            x = tf.squeeze(conv1, axis=-1) #x.shape = (batch_sz, height=1, width=1, dim, input_ch)
             
             # Attention Routing
             # attentions shape =(batch_sz, height, width, 1, input_ch)
@@ -259,19 +247,13 @@ class FullyConvCaps(layers.Layer):
             attentions = tf.nn.softmax(attentions, axis=-1)
             final_attentions = Multiply()([x, attentions])
             final_attentions = tf.reduce_sum(final_attentions, axis=-1) #final_attentions.shape = (batch_sz, height, width, dim)
-            final_attentions = Dropout(rate=0.5)(final_attentions)
             
-            # Feature Extraction
-            conv2 = tf.nn.conv2d(final_attentions, FeaExt_w, strides=[1, 1, 1, 1], padding='VALID')
-            conv2 = tf.nn.bias_add(conv2, FeaExt_b)
-            conv2 = tf.nn.relu(conv2)
-            
-            conv3 = tf.nn.conv2d(conv2, CapsAct_w, strides=[1, 1, 1, 1], padding='SAME')
+            conv3 = tf.nn.conv2d(final_attentions, CapsAct_w, strides=[1, 1, 1, 1], padding='SAME')
             conv3 = tf.nn.bias_add(conv3, CapsAct_b)
             return conv3
         
-        outputs = [func(Att_input, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b) for Att_input, Att_w, FeaExt_w, CapsAct_w, FeaExt_b, CapsAct_b in 
-                   zip(Att_inputs, Att_ws, FeaExt_ws, CapsAct_ws, FeaExt_bs, CapsAct_bs)]
+        outputs = [func(Att_input, Att_w, CapsAct_w, CapsAct_b) for Att_input, Att_w, CapsAct_w, CapsAct_b in 
+                   zip(Att_inputs, Att_ws, CapsAct_ws, CapsAct_bs)]
         outputs = tf.concat(outputs, axis=-1)
         outputs = tf.reshape(outputs, [-1, self.dim_capsule, self.n_channels])
         outputs = tf.transpose(outputs, [0, 2, 1])

@@ -24,7 +24,7 @@ def AR_CapsNet(input_shape, args):
                      kernel_regularizer=kernel_regularizer)
     
     ## Primary Capsules
-    primarycaps = PrimaryCap(n_channels=8, dim_capsule=16, kernel_regularizer=kernel_regularizer)(conv1)
+    primarycaps = PrimaryCap(n_channels=8, dim_capsule=16, decrease_resolution=True, kernel_regularizer=kernel_regularizer)(conv1)
     primarycaps = Activation('tanh')(primarycaps)
     print('primary caps shape : ', primarycaps.shape)
         
@@ -43,7 +43,7 @@ def AR_CapsNet(input_shape, args):
         print('ConvCaps1 shape : ', ConvCaps1.shape)
         
         ConvCaps2 = ConvCaps(n_channels=8, dim_capsule=dim_caps, decrease_resolution = False, kernel_regularizer=kernel_regularizer)(ConvCaps1)
-        ConvCaps2 = Activation('tanh')(Add()([ConvCaps11 , ConvCaps2]))
+        ConvCaps2 = Activation('tanh')(Add()([ConvCaps1 , ConvCaps2]))
         print('ConvCaps2 shape : ', ConvCaps2.shape)
         out = ConvCaps2
         
@@ -131,7 +131,6 @@ def train(train_model, x_train, y_train, args):
                       loss=[margin_loss, 'mse'],
                       loss_weights=[1., 0.3],
                       metrics=['acc'])
-    lr_decay = callbacks.LearningRateScheduler(schedule=lambda epoch: initial_lr * (0.99 ** epoch))
     
     if args.augment == 'False':
         # Training without data augmentation:
@@ -141,12 +140,14 @@ def train(train_model, x_train, y_train, args):
         
     elif args.augment == 'True':
         from keras.preprocessing.image import ImageDataGenerator
-        shift_fraction = args.shift_fraction
+        shift_fraction = float(args.shift_fraction)
         if args.dataset == 'mnist':
             flip = False
         elif args.dataset == 'cifar10':
             flip = True
-        datagen = ImageDataGenerator(
+            
+        if args.dataset in ['mnist', 'cifar10']:
+            datagen = ImageDataGenerator(
                 featurewise_center=False,  # set input mean to 0 over the dataset
                 samplewise_center=False,  # set each sample mean to 0
                 featurewise_std_normalization=False,  # divide inputs by std of the dataset
@@ -172,6 +173,34 @@ def train(train_model, x_train, y_train, args):
                 preprocessing_function=None,
                 # image data format, either "channels_first" or "channels_last"
                 data_format=None)
+        else:
+            #If args.dataset == 'affnist': shift_fraction = 0.2
+            datagen = ImageDataGenerator(
+                    featurewise_center=False,  # set input mean to 0 over the dataset
+                    samplewise_center=False,  # set each sample mean to 0
+                    featurewise_std_normalization=False,  # divide inputs by std of the dataset
+                    samplewise_std_normalization=False,  # divide each input by its std
+                    zca_whitening=False,  # apply ZCA whitening
+                    zca_epsilon=0,  # epsilon for ZCA whitening
+                    rotation_range=0,  # randomly rotate images in the range (degrees, 0 to 180)
+                    # randomly shift images horizontally (fraction of total width)
+                    width_shift_range=0.2,
+                    # randomly shift images vertically (fraction of total height)
+                    height_shift_range=0.2,
+                    shear_range=0.,  # set range for random shear
+                    zoom_range=0.,  # set range for random zoom
+                    channel_shift_range=0.,  # set range for random channel shifts
+                    # set mode for filling points outside the input boundaries
+                    fill_mode='nearest',
+                    cval=0.,  # value used for fill_mode = "constant"
+                    horizontal_flip=True,  # randomly flip images
+                    vertical_flip=False,  # randomly flip images
+                    # set rescaling factor (applied before any other transformation)
+                    rescale=None,
+                    # set function that will be applied on each input
+                    preprocessing_function=None,
+                    # image data format, either "channels_first" or "channels_last"
+                    data_format=None)
 
         def train_generator(x, y, batch_size):
             train_datagen = datagen  
@@ -182,8 +211,14 @@ def train(train_model, x_train, y_train, args):
                 yield ([x_batch, y_batch], [y_batch, x_batch])
         
         from sklearn.model_selection import train_test_split
-        x_train_, x_val_, y_train_, y_val_ = train_test_split(x_train, y_train, test_size=valid_ratio, random_state=42)
-
+        if args.dataset in ['mnist', 'cifar10']:
+            x_train_, x_val_, y_train_, y_val_ = train_test_split(x_train, y_train, test_size=valid_ratio, random_state=42)
+        else:
+            from keras.utils import to_categorical
+            x_train_ = x_train
+            y_train_ = y_train
+            x_val_, y_val_ = prepare_affNIST('./affnist/validation.mat')
+            y_val_ = to_categorical(y_val_, num_classes=10)
 
         hist = train_model.fit_generator(generator=train_generator(x_train_, y_train_, args.batch_size),
                             steps_per_epoch=int(y_train.shape[0] / args.batch_size),
@@ -224,15 +259,28 @@ def cifar10():
     x_test = x_test.reshape(-1, 32, 32, 3).astype('float32') / 255.
     y_train = to_categorical(y_train.astype('float32'))
     y_test = to_categorical(y_test.astype('float32'))
-#     return (x_train[:500,...], y_train[:500,...]), (x_test, y_test)
+
     return (x_train, y_train), (x_test, y_test)
 
+def prepare_affNIST(path):
+    from scipy.io import loadmat
+    from sklearn.utils import shuffle
+    
+    afftest = loadmat(path)
+    afftest_images = afftest['affNISTdata']['image'][0][0].transpose()
+    afftest_images = afftest_images.reshape((afftest_images.shape[0], 40, 40, 1)).astype(np.float64) /255.
+
+    afftest_labels = afftest['affNISTdata']['label_int'][0][0].transpose()
+    afftest_labels = afftest_labels.reshape((afftest_labels.shape[0])).astype(np.int64) 
+    afftest_images, afftest_labels = shuffle(afftest_images, afftest_labels)
+    
+    return afftest_images, afftest_labels
 
 if __name__ == "__main__":
     import argparse
     
     # setting the hyper parameters
-    parser = argparse.ArgumentParser(description="AR Capsule Network on MNIST.")
+    parser = argparse.ArgumentParser(description="AR Capsule Network on MNIST, CIFAR10, and affNIST.")
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--batch_size', default=100, type=int)
     parser.add_argument('--debug', action='store_true',
@@ -248,6 +296,7 @@ if __name__ == "__main__":
     parser.add_argument('--layernum', default="0", help="layernum")
     parser.add_argument('--dimcaps', default="16", help="dimcaps")
     parser.add_argument('--validratio', default="1", help="validratio")
+    parser.add_argument('--shift_fraction', default='0.1', help="shift_fraction")
     #parser.add_argument('--log_dir', default='./result')
     
 
@@ -259,11 +308,16 @@ if __name__ == "__main__":
         os.makedirs(args.save_dir)
 
     # load data
+    assert(args.dataset in ['mnist', 'cifar10', 'affnist'])
     if args.dataset == 'mnist':
         (x_train, y_train), (x_test, y_test) = load_mnist()
     elif args.dataset == 'cifar10':
         (x_train, y_train), (x_test, y_test) = cifar10()
-    
+    elif args.dataset == 'affnist':
+        assert(args.augment == 'True')
+        (x_train, y_train), (_, _) = load_mnist()
+        x_train = np.pad(x_train, ((0,0), (6,6),(6,6),(0,0)), mode='constant') 
+        
     model = AR_CapsNet(x_train[0].shape, args)
     
     print(model.summary())
